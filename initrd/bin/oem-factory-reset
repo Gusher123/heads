@@ -18,6 +18,7 @@ WIDTH="220"
 USER_PIN_DEF=123456
 ADMIN_PIN_DEF=12345678
 TPM_PASS_DEF=12345678
+CUSTOM_PASS=""
 
 ## External files sourced
 
@@ -85,6 +86,29 @@ gpg_key_reset()
         whiptail_error_die "GPG Key automatic keygen failed!\n\n$ERROR"
     fi
 }
+gpg_key_change_pin()
+{
+    # 1 = user PIN, 3 = admin PIN
+    PIN_TYPE=$1
+    PIN_ORIG=$2
+    PIN_NEW=$3
+    # Change PIN
+    {
+        echo admin
+        echo passwd
+        echo ${PIN_TYPE}
+        echo ${PIN_ORIG}
+        echo ${PIN_NEW}
+        echo ${PIN_NEW}
+        echo q
+        echo q
+    } | gpg --command-fd=0 --status-fd=2 --pinentry-mode=loopback --card-edit \
+        > /tmp/gpg_card_edit_output 2>/dev/null 
+    if [ $? -ne 0 ]; then
+        ERROR=`cat /tmp/gpg_card_edit_output`
+        whiptail_error_die "GPG Key PIN change failed!\n\n$ERROR"
+    fi
+}
 
 generate_checksums()
 {
@@ -130,7 +154,7 @@ generate_checksums()
     # sign kexec boot files
     if sha256sum $param_files 2>/dev/null | gpg \
             --pinentry-mode loopback \
-            --passphrase $USER_PIN_DEF \
+            --passphrase "$USER_PIN_DEF" \
             --digest-algo SHA256 \
             --detach-sign \
             -a \
@@ -217,6 +241,26 @@ if ! whiptail --yesno "
     exit 1
 fi
 
+# Prompt to change default passwords
+echo -e -n "Would you like to set a custom password? [y/N]: "
+read -n 1 prompt_output
+echo
+if [ "$prompt_output" == "y" \
+  -o "$prompt_output" == "Y" ] \
+; then
+  echo -e "\nThe custom password will be used for the
+TPM admin and GPG user/admin passwords.
+It must be at least 8 characters in length.\n"
+  CUSTOM_PASS=""
+  echo
+  while [[  ${#CUSTOM_PASS} -lt 8 ]] ; do
+    echo -e -n "Enter the custom password: "
+    read CUSTOM_PASS
+  done
+  echo
+  TPM_PASS_DEF=$CUSTOM_PASS
+fi
+
 ## sanity check the USB, GPG key, and boot device before proceeding further
 
 # mount USB, then remount rw
@@ -272,11 +316,21 @@ gpg --list-keys >/dev/null 2>&1
 echo -e "\nResetting GPG Key...\n(this will take a minute or two)\n"
 gpg_key_reset
 
-## export generated key to USB
-echo -e "\nExporting generated key to USB...\n"
 # parse name of generated key
 GPG_GEN_KEY=`grep -A1 pub /tmp/gpg_card_edit_output | tail -n1 | sed -nr 's/^([ ])*//p'`
 PUBKEY="/tmp/${GPG_GEN_KEY}.asc"
+
+if [ "$CUSTOM_PASS" != "" ]; then
+  echo -e "\nChanging default GPG Admin PIN\n"
+  gpg_key_change_pin "3" "$ADMIN_PIN_DEF" "$CUSTOM_PASS"
+  echo -e "\nChanging default GPG User PIN\n"
+  gpg_key_change_pin "1" "$USER_PIN_DEF" "$CUSTOM_PASS"
+  USER_PIN_DEF=$CUSTOM_PASS
+  ADMIN_PIN_DEF=$CUSTOM_PASS
+fi
+
+## export generated key to USB
+echo -e "\nExporting generated key to USB...\n"
 # export pubkey to file
 if ! gpg --export --armor $GPG_GEN_KEY > "${PUBKEY}" 2>/tmp/error ; then
     ERROR=$(tail -n 1 /tmp/error)
@@ -349,7 +403,7 @@ whiptail --msgbox "
     The OEM Factory Reset has completed successfully\n\n
     After rebooting, you will need to generate new TOTP/HOTP secrets\n
     when prompted in order to complete the setup process.\n\n
-    Press any key to reboot.\n" \
+    Press Enter to reboot.\n" \
     $WIDTH $HEIGHT --title "OEM Factory Reset Complete"
 
 reboot
